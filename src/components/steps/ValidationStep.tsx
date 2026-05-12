@@ -11,9 +11,9 @@ import { GuidanceMessage } from '@/components/validation/GuidanceMessage';
 import { StabilityIndicator } from '@/components/validation/StabilityIndicator';
 import { Button } from '@/components/ui/Button';
 import { ko } from '@/locales/ko';
+import { CAMERA_CONSTRAINTS } from '@/lib/constants';
 
 interface ValidationStepProps {
-  stream: MediaStream | null;
   onCapture: (data: CaptureData) => void;
   onBack: () => void;
 }
@@ -31,21 +31,27 @@ const DEFAULT_STATE: ValidationState = {
   noGlare: { status: 'unknown', message: '' },
 };
 
-export function ValidationStep({ stream, onCapture, onBack }: ValidationStepProps) {
+type CameraInitState = 'starting' | 'playing' | 'failed';
+
+export function ValidationStep({ onCapture, onBack }: ValidationStepProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
   const rafRef = useRef<number>(0);
   const [showFlash, setShowFlash] = useState(false);
   const [validationState, setValidationState] = useState<ValidationState>(DEFAULT_STATE);
+  const [cameraState, setCameraState] = useState<CameraInitState>('starting');
+  const [cameraError, setCameraError] = useState<string | null>(null);
+  const [retryKey, setRetryKey] = useState(0);
   const lastLandmarksRef = useRef<NormalizedLandmarkList | null>(null);
 
-  const { detect, isLoading, error } = useFaceLandmarker();
+  const { detect, isLoading: modelLoading, error: modelError } = useFaceLandmarker();
   const { validate } = useValidation();
 
   const doCapture = useCallback(() => {
-    if (!videoRef.current || !canvasRef.current || !lastLandmarksRef.current) return;
-
     const video = videoRef.current;
+    if (!video || !canvasRef.current || !lastLandmarksRef.current) return;
+
     const captureCanvas = document.createElement('canvas');
     captureCanvas.width = video.videoWidth;
     captureCanvas.height = video.videoHeight;
@@ -73,43 +79,98 @@ export function ValidationStep({ stream, onCapture, onBack }: ValidationStepProp
 
   const { state: captureState, progress, update: updateAutoCapture } = useAutoCapture(doCapture);
 
-  // Attach stream and force play (iOS Safari needs explicit play())
+  // Acquire and attach camera stream (own lifecycle, no cross-component sharing)
   useEffect(() => {
-    const video = videoRef.current;
-    if (!video || !stream) return;
+    let cancelled = false;
+    let stuckCheckTimer: ReturnType<typeof setTimeout> | null = null;
 
-    stream.getVideoTracks().forEach((t) => {
-      t.enabled = true;
-    });
+    async function initCamera() {
+      setCameraState('starting');
+      setCameraError(null);
 
-    if (video.srcObject !== stream) {
-      video.srcObject = stream;
+      try {
+        const mediaStream = await navigator.mediaDevices.getUserMedia(CAMERA_CONSTRAINTS);
+        if (cancelled) {
+          mediaStream.getTracks().forEach((t) => t.stop());
+          return;
+        }
+        streamRef.current = mediaStream;
+
+        const video = videoRef.current;
+        if (!video) return;
+
+        video.muted = true;
+        video.playsInline = true;
+        video.srcObject = mediaStream;
+
+        try {
+          await video.play();
+        } catch (err) {
+          console.error('[ValidationStep] play() failed:', err);
+        }
+
+        // Check after 3s if video is actually rendering
+        stuckCheckTimer = setTimeout(() => {
+          const v = videoRef.current;
+          if (!cancelled && v && v.videoWidth === 0) {
+            setCameraState('failed');
+            setCameraError(
+              'iOS Safari: 비디오가 표시되지 않습니다. 페이지를 새로고침하거나 다시 시도해 주세요.'
+            );
+          }
+        }, 3000);
+
+        // Mark as playing once video has dimensions
+        const onPlaying = () => {
+          if (!cancelled) setCameraState('playing');
+        };
+        video.addEventListener('playing', onPlaying, { once: true });
+        if (video.videoWidth > 0) {
+          setCameraState('playing');
+        }
+      } catch (err) {
+        if (cancelled) return;
+        console.error('[ValidationStep] getUserMedia failed:', err);
+        setCameraState('failed');
+        if (err instanceof DOMException) {
+          if (err.name === 'NotAllowedError') {
+            setCameraError(ko.camera.denied);
+          } else if (err.name === 'NotFoundError') {
+            setCameraError(ko.camera.notFound);
+          } else {
+            setCameraError(`${ko.camera.error} (${err.name})`);
+          }
+        } else {
+          setCameraError(ko.camera.error);
+        }
+      }
     }
 
-    const tryPlay = () => {
-      video.play().catch((err) => {
-        console.error('[ValidationStep] video.play() failed:', err);
-      });
+    initCamera();
+
+    return () => {
+      cancelled = true;
+      if (stuckCheckTimer) clearTimeout(stuckCheckTimer);
+      const video = videoRef.current;
+      if (video) {
+        video.pause();
+        video.srcObject = null;
+      }
+      const stream = streamRef.current;
+      if (stream) {
+        stream.getTracks().forEach((t) => t.stop());
+        streamRef.current = null;
+      }
     };
-
-    if (video.readyState >= 2) {
-      tryPlay();
-    } else {
-      const onLoaded = () => tryPlay();
-      video.addEventListener('loadedmetadata', onLoaded, { once: true });
-      return () => video.removeEventListener('loadedmetadata', onLoaded);
-    }
-  }, [stream]);
+  }, [retryKey]);
 
   // Animation loop
   useEffect(() => {
-    if (isLoading || !stream) return;
+    if (modelLoading || cameraState !== 'playing') return;
 
     let running = true;
-
     const loop = () => {
       if (!running) return;
-
       const video = videoRef.current;
       const canvas = canvasRef.current;
       if (video && canvas && video.readyState >= 2) {
@@ -121,25 +182,23 @@ export function ValidationStep({ stream, onCapture, onBack }: ValidationStepProp
           lastLandmarksRef.current = result.faceLandmarks[0] as unknown as NormalizedLandmarkList;
         }
 
-        const allPass = isAllPassed(state);
-        updateAutoCapture(allPass);
+        updateAutoCapture(isAllPassed(state));
       }
-
       rafRef.current = requestAnimationFrame(loop);
     };
-
     rafRef.current = requestAnimationFrame(loop);
 
     return () => {
       running = false;
       cancelAnimationFrame(rafRef.current);
     };
-  }, [isLoading, stream, detect, validate, updateAutoCapture]);
+  }, [modelLoading, cameraState, detect, validate, updateAutoCapture]);
 
   const allPass = isAllPassed(validationState);
   const guidance = allPass ? '' : getGuidanceMessage(validationState);
 
-  if (isLoading) {
+  // Loading states
+  if (modelLoading) {
     return (
       <div className="flex-1 flex flex-col items-center justify-center px-4 gap-4">
         <div className="w-16 h-16 rounded-full bg-blue-50 flex items-center justify-center">
@@ -156,10 +215,10 @@ export function ValidationStep({ stream, onCapture, onBack }: ValidationStepProp
     );
   }
 
-  if (error) {
+  if (modelError) {
     return (
       <div className="flex-1 flex flex-col items-center justify-center px-4 gap-4">
-        <p className="text-sm text-red-600">{error}</p>
+        <p className="text-sm text-red-600">{modelError}</p>
         <Button variant="secondary" onClick={onBack}>{ko.back}</Button>
       </div>
     );
@@ -189,33 +248,55 @@ export function ValidationStep({ stream, onCapture, onBack }: ValidationStepProp
           className="absolute inset-0 w-full h-full object-cover"
         />
 
-        <FaceGuideOverlay allPassed={allPass} />
-
-        <StabilityIndicator
-          progress={progress}
-          visible={captureState === 'stabilizing'}
-        />
-
-        {/* Flash overlay */}
-        {showFlash && (
-          <div className="absolute inset-0 bg-white capture-flash" />
+        {cameraState === 'playing' && (
+          <>
+            <FaceGuideOverlay allPassed={allPass} />
+            <StabilityIndicator
+              progress={progress}
+              visible={captureState === 'stabilizing'}
+            />
+            {showFlash && <div className="absolute inset-0 bg-white capture-flash" />}
+            <div className="absolute bottom-3 left-3 right-3">
+              <GuidanceMessage message={guidance} allPassed={allPass} />
+            </div>
+          </>
         )}
 
-        {/* Guidance at bottom of video */}
-        <div className="absolute bottom-3 left-3 right-3">
-          <GuidanceMessage message={guidance} allPassed={allPass} />
-        </div>
+        {cameraState === 'starting' && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-black/80">
+            <svg className="w-8 h-8 text-white animate-spin" fill="none" viewBox="0 0 24 24">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+            </svg>
+            <p className="text-sm text-white">{ko.camera.requesting}</p>
+          </div>
+        )}
+
+        {cameraState === 'failed' && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-black/90 px-4 text-center">
+            <svg className="w-10 h-10 text-red-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
+            </svg>
+            <p className="text-sm text-white leading-relaxed">
+              {cameraError || ko.camera.error}
+            </p>
+            <Button
+              size="sm"
+              onClick={() => setRetryKey((k) => k + 1)}
+            >
+              {ko.capture.retake}
+            </Button>
+          </div>
+        )}
       </div>
 
-      {/* Hidden canvas for image analysis */}
       <canvas ref={canvasRef} className="hidden" />
 
-      {/* Checklist below video */}
+      {/* Checklist */}
       <div className="mt-3 rounded-xl bg-white p-3 shadow-sm border border-gray-100">
         <ValidationChecklist state={validationState} />
       </div>
 
-      {/* Back button */}
       <div className="mt-3">
         <Button variant="ghost" onClick={onBack} size="sm">
           {ko.back}

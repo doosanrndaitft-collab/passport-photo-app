@@ -13,7 +13,6 @@ const STEPS: WizardStep[] = ['guide', 'camera', 'validation', 'review'];
 export default function Home() {
   const [currentStep, setCurrentStep] = useState<WizardStep>('guide');
   const [captureData, setCaptureData] = useState<CaptureData | null>(null);
-  const [stream, setStream] = useState<MediaStream | null>(null);
 
   const stepIndex = STEPS.indexOf(currentStep);
 
@@ -31,18 +30,6 @@ export default function Home() {
     goToStep('validation');
   }, [goToStep]);
 
-  const stopCamera = useCallback(() => {
-    if (stream) {
-      stream.getTracks().forEach((t) => t.stop());
-      setStream(null);
-    }
-  }, [stream]);
-
-  const handleBackToGuide = useCallback(() => {
-    stopCamera();
-    goToStep('guide');
-  }, [stopCamera, goToStep]);
-
   return (
     <main className="flex-1 flex flex-col max-w-lg mx-auto w-full">
       <header className="px-4 pt-4 pb-2">
@@ -56,14 +43,11 @@ export default function Home() {
         {currentStep === 'camera' && (
           <CameraSetupStep
             onNext={() => goToStep('validation')}
-            onBack={handleBackToGuide}
-            stream={stream}
-            setStream={setStream}
+            onBack={() => goToStep('guide')}
           />
         )}
         {currentStep === 'validation' && (
           <ValidationStep
-            stream={stream}
             onCapture={handleCapture}
             onBack={() => goToStep('camera')}
           />

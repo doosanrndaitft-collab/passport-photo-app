@@ -8,25 +8,16 @@ import { CAMERA_CONSTRAINTS } from '@/lib/constants';
 interface CameraSetupStepProps {
   onNext: () => void;
   onBack: () => void;
-  stream: MediaStream | null;
-  setStream: (stream: MediaStream | null) => void;
 }
 
 type CameraState = 'requesting' | 'ready' | 'denied' | 'not-found' | 'error';
 
-export function CameraSetupStep({ onNext, onBack, stream, setStream }: CameraSetupStepProps) {
-  const [state, setState] = useState<CameraState>(stream ? 'ready' : 'requesting');
+export function CameraSetupStep({ onNext, onBack }: CameraSetupStepProps) {
+  const [state, setState] = useState<CameraState>('requesting');
   const videoRef = useRef<HTMLVideoElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
 
   useEffect(() => {
-    if (stream) {
-      setState('ready');
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-      }
-      return;
-    }
-
     let cancelled = false;
 
     async function startCamera() {
@@ -36,21 +27,26 @@ export function CameraSetupStep({ onNext, onBack, stream, setStream }: CameraSet
           mediaStream.getTracks().forEach((t) => t.stop());
           return;
         }
-        setStream(mediaStream);
+        streamRef.current = mediaStream;
         setState('ready');
-        if (videoRef.current) {
-          videoRef.current.srcObject = mediaStream;
+
+        const video = videoRef.current;
+        if (video) {
+          video.muted = true;
+          video.playsInline = true;
+          video.srcObject = mediaStream;
+          try {
+            await video.play();
+          } catch (err) {
+            console.error('[CameraSetupStep] play() failed:', err);
+          }
         }
       } catch (err) {
         if (cancelled) return;
         if (err instanceof DOMException) {
-          if (err.name === 'NotAllowedError') {
-            setState('denied');
-          } else if (err.name === 'NotFoundError') {
-            setState('not-found');
-          } else {
-            setState('error');
-          }
+          if (err.name === 'NotAllowedError') setState('denied');
+          else if (err.name === 'NotFoundError') setState('not-found');
+          else setState('error');
         } else {
           setState('error');
         }
@@ -58,31 +54,21 @@ export function CameraSetupStep({ onNext, onBack, stream, setStream }: CameraSet
     }
 
     startCamera();
-    return () => { cancelled = true; };
-  }, [stream, setStream]);
 
-  useEffect(() => {
-    const video = videoRef.current;
-    if (!video || !stream) return;
-
-    if (video.srcObject !== stream) {
-      video.srcObject = stream;
-    }
-
-    const tryPlay = () => {
-      video.play().catch((err) => {
-        console.error('[CameraSetupStep] video.play() failed:', err);
-      });
+    return () => {
+      cancelled = true;
+      const video = videoRef.current;
+      if (video) {
+        video.pause();
+        video.srcObject = null;
+      }
+      const stream = streamRef.current;
+      if (stream) {
+        stream.getTracks().forEach((t) => t.stop());
+        streamRef.current = null;
+      }
     };
-
-    if (video.readyState >= 2) {
-      tryPlay();
-    } else {
-      const onLoaded = () => tryPlay();
-      video.addEventListener('loadedmetadata', onLoaded, { once: true });
-      return () => video.removeEventListener('loadedmetadata', onLoaded);
-    }
-  }, [stream]);
+  }, []);
 
   return (
     <div className="flex-1 flex flex-col px-4 pb-4 fade-in">
@@ -106,7 +92,8 @@ export function CameraSetupStep({ onNext, onBack, stream, setStream }: CameraSet
                 autoPlay
                 playsInline
                 muted
-                className="absolute inset-0 w-full h-full"
+                disablePictureInPicture
+                className="absolute inset-0 w-full h-full object-cover"
               />
             </div>
             <div className="flex items-center gap-2 justify-center">
