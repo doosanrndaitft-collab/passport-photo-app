@@ -107,6 +107,8 @@ export const ko = {
     stabilizing: '촬영 중... 움직이지 마세요',
     captured: '촬영 완료!',
     retake: '다시 촬영',
+    autoNotice: '모든 조건이 충족되면 1.5초 후 자동으로 촬영됩니다',
+    autoNoticeShort: '조건 충족 시 자동 촬영',
   },
 
   // Review step
