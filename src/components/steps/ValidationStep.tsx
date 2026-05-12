@@ -73,10 +73,31 @@ export function ValidationStep({ stream, onCapture, onBack }: ValidationStepProp
 
   const { state: captureState, progress, update: updateAutoCapture } = useAutoCapture(doCapture);
 
-  // Attach stream to video
+  // Attach stream and force play (iOS Safari needs explicit play())
   useEffect(() => {
-    if (stream && videoRef.current) {
-      videoRef.current.srcObject = stream;
+    const video = videoRef.current;
+    if (!video || !stream) return;
+
+    stream.getVideoTracks().forEach((t) => {
+      t.enabled = true;
+    });
+
+    if (video.srcObject !== stream) {
+      video.srcObject = stream;
+    }
+
+    const tryPlay = () => {
+      video.play().catch((err) => {
+        console.error('[ValidationStep] video.play() failed:', err);
+      });
+    };
+
+    if (video.readyState >= 2) {
+      tryPlay();
+    } else {
+      const onLoaded = () => tryPlay();
+      video.addEventListener('loadedmetadata', onLoaded, { once: true });
+      return () => video.removeEventListener('loadedmetadata', onLoaded);
     }
   }, [stream]);
 
@@ -153,7 +174,8 @@ export function ValidationStep({ stream, onCapture, onBack }: ValidationStepProp
           autoPlay
           playsInline
           muted
-          className="absolute inset-0 w-full h-full"
+          disablePictureInPicture
+          className="absolute inset-0 w-full h-full object-cover"
         />
 
         <FaceGuideOverlay allPassed={allPass} />

@@ -49,13 +49,13 @@ export const THRESHOLDS = {
   eyeBlinkMax: 0.45,
   jawOpenMax: 0.15,
   smileSumMax: 0.35,
-  // Background analysis
-  bgMinChannel: 185,
-  bgMaxChannelDiff: 35,
-  bgPassRatio: 0.80,
+  // Background analysis (lenient: allows off-white/cream walls but rejects clearly colored backgrounds)
+  bgMinChannel: 165,
+  bgMaxChannelDiff: 50,
+  bgPassRatio: 0.72,
   bgSampleCount: 200,
   // Shadow detection
-  bgMaxStdDev: 20,
+  bgMaxStdDev: 28,
   // Sharpness (Laplacian variance)
   minSharpness: 30,
   // Glasses glare

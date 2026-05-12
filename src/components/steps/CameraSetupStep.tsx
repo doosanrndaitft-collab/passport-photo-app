@@ -62,8 +62,25 @@ export function CameraSetupStep({ onNext, onBack, stream, setStream }: CameraSet
   }, [stream, setStream]);
 
   useEffect(() => {
-    if (stream && videoRef.current) {
-      videoRef.current.srcObject = stream;
+    const video = videoRef.current;
+    if (!video || !stream) return;
+
+    if (video.srcObject !== stream) {
+      video.srcObject = stream;
+    }
+
+    const tryPlay = () => {
+      video.play().catch((err) => {
+        console.error('[CameraSetupStep] video.play() failed:', err);
+      });
+    };
+
+    if (video.readyState >= 2) {
+      tryPlay();
+    } else {
+      const onLoaded = () => tryPlay();
+      video.addEventListener('loadedmetadata', onLoaded, { once: true });
+      return () => video.removeEventListener('loadedmetadata', onLoaded);
     }
   }, [stream]);
 
